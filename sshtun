@@ -1,0 +1,144 @@
+#!/bin/bash
+
+CONFIG_FILE="/etc/sshtun/sshtun.conf"
+SSH_SEARCH_STRING="[s]sh -D"
+SSH_COMMAND_TEMPLATE="ssh -D port -f -C -q -N connection"
+
+COLOR='\033[0;33m'
+NO_COLOR='\033[0m'
+
+function kill_tunnels
+{
+	local result=""
+	result=$(ps aux | pgrep -f "$SSH_SEARCH_STRING")
+	local returnCode=$?
+
+	if [ $returnCode -eq 1 ]; then
+		echo "Cannot find SSH processes!"
+		return 1
+	else
+		pid_array=($result)
+
+		for pid in "${pid_array[@]}" 
+		do
+			echo "Killing $pid..."
+
+			kill "$pid"
+			returnCode=$?
+
+			if [ $returnCode -eq 0 ]; then
+				echo "Successfully killed proces with PID: $pid" 
+			else
+				echo "Failed to kill process with PID: $pid"
+			fi
+		done
+	fi
+
+	return 0
+}
+
+function start_tunel
+{
+	local configName=$1
+	
+	local ip=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $2}')
+	local user=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $3}')
+	local port=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $4}')
+
+	local connection=$user@$ip
+	local sshCommand=$(sed -e "s/\port/$port/" -e "s/\connection/$connection/" <<< "$SSH_COMMAND_TEMPLATE")
+
+	log "Executing command: $sshCommand"
+	eval "$sshCommand"
+
+	return $?
+}
+
+function list_tunnels
+{
+	local tunels=""
+	tunels=$(ps aux | grep "$SSH_SEARCH_STRING")
+	local returnCode=$?
+
+	if [ $returnCode -eq 1 ]; then
+		log "No active tunnels."
+	else
+		log "Displaying active tunnels..."
+		echo "$tunels"
+		returnCode=$?
+	fi
+
+	return $returnCode
+}
+
+function read_config_file
+{
+	log "Displaying configuration file..."
+	column -t "$CONFIG_FILE"
+
+	return $?
+}
+
+function print_help
+{
+	cat << EOF
+	DESCRIPTION
+	Manage SSH tunnels.
+
+	OPTIONS
+	-c				Print the contents of the configuration file.
+	-k				Kills all currently active SSH tunnels.
+	-l				List all currently active SSH tunnels.
+	-s <alias>		Starts an SSH tunel with the given alias.
+	-h				Help.
+
+	EXAMPLES
+	sshtun -s local 
+EOF
+
+	return $?
+}
+
+log() 
+{
+    local text=$1
+    echo -e "${COLOR}[$(date)]: ${COLOR}$text${NO_COLOR}"
+}
+
+# check for single character options
+while getopts ":cklhs:" opt; do
+	case $opt in
+		c)
+			read_config_file
+			exit $?
+		;;
+		k)
+			kill_tunnels
+			exit $?
+		;;
+		l)
+			list_tunnels
+			exit $?
+		;;
+		h)
+			print_help
+			exit $?
+		;;
+		s)
+			start_tunel "$OPTARG"
+			exit $?
+		;;
+		r)
+			read_config_file
+			exit $?
+		;;
+		\?)
+			echo "Invalid option: -$OPTARG" >&2
+			exit 1
+		;;
+		:)
+			echo "Option -$OPTARG requires an argument." >&2
+			exit 1
+		;;
+	esac
+done
