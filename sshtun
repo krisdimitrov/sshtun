@@ -3,9 +3,44 @@
 CONFIG_FILE="/etc/sshtun/sshtun.conf"
 SSH_SEARCH_STRING="[s]sh -D"
 SSH_COMMAND_TEMPLATE="ssh -D port -f -C -q -N connection"
+VERBOSE=0
+PROFILE=""
 
-COLOR='\033[0;33m'
+YELLOW='\033[0;33m'
+LIGHT_RED='\033[1;31m'
 NO_COLOR='\033[0m'
+
+function start_tunel
+{
+	local alias=$1
+	log_debug "Alias: $alias"
+
+	local ip=""
+	ip=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $2}')
+	log_debug "IP: $ip"
+
+	local user=""
+	user=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $3}')
+	log_debug "User: $user"
+
+	local port=""
+	port=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $4}')
+	log_debug "Port: $port"
+
+	local connection=""
+	connection="$user@$ip"
+	log_debug "Connection: $connection"
+
+	local sshCommand=""
+	sshCommand=$(sed -e "s/port/$port/" -e "s/connection/$connection/" <<< "$SSH_COMMAND_TEMPLATE")
+	log_debug "Executing command: $sshCommand"
+
+	log_info "Starting SSH tunnel '$alias'"
+	eval "$sshCommand"
+
+	create_firefox_profile "$alias" "$port"
+	PROFILE=$alias
+}
 
 function kill_tunnels
 {
@@ -33,25 +68,6 @@ function kill_tunnels
 			fi
 		done
 	fi
-
-	return 0
-}
-
-function start_tunel
-{
-	local configName=$1
-	
-	local ip=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $2}')
-	local user=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $3}')
-	local port=$(cat $CONFIG_FILE | grep "$configName" | awk '{print $4}')
-
-	local connection=$user@$ip
-	local sshCommand=$(sed -e "s/\port/$port/" -e "s/\connection/$connection/" <<< "$SSH_COMMAND_TEMPLATE")
-
-	log "Executing command: $sshCommand"
-	eval "$sshCommand"
-
-	return $?
 }
 
 function list_tunnels
@@ -61,76 +77,122 @@ function list_tunnels
 	local returnCode=$?
 
 	if [ $returnCode -eq 1 ]; then
-		log "No active tunnels."
+		log_info "No active tunnels."
 	else
-		log "Displaying active tunnels..."
+		log_info "Displaying active tunnels..."
 		echo "$tunels"
 		returnCode=$?
 	fi
-
-	return $returnCode
 }
 
 function read_config_file
 {
-	log "Displaying configuration file..."
+	log_info "Displaying configuration file..."
 	column -t "$CONFIG_FILE"
+}
 
-	return $?
+function set_user_pref() 
+{
+	if [ $(grep -c "user_pref(\"$2\", .*);" $1) -eq 1 ]; then
+		sed -i .bckp "s/user_pref(\"$2\", .*);/user_pref(\"$2\", $3);/" $1	
+	else
+		echo "user_pref(\"$2\", $3);" >> $1
+	fi
+}
+
+function create_firefox_profile
+{
+	log_info "Creating Firefox profile..."
+
+	local ff_profile=$1
+	log_debug "Firefox Profile: $ff_profile"
+
+	local proxy_port=$2
+	local profile_path="."
+
+	# Create new firefox profile to be configured with  the SOCKS proxy
+	if [ ! -d /Users/$USER/Library/Application\ Support/Firefox/Profiles/*.$ff_profile/ ]; then
+		/Applications/Firefox.app/Contents/MacOS/firefox -CreateProfile $ff_profile
+	fi
+
+	cd /Users/$USER/Library/Application\ Support/Firefox/Profiles/*.$ff_profile/
+
+	set_user_pref $profile_path/prefs.js network.proxy.type 1
+	set_user_pref $profile_path/prefs.js network.proxy.socks_remote_dns true
+	set_user_pref $profile_path/prefs.js network.proxy.socks \"localhost\"
+	set_user_pref $profile_path/prefs.js network.proxy.socks_port $proxy_port
+}
+
+function run_firefox_with_profile
+{
+	local profile=$1
+	/Applications/Firefox.app/Contents/MacOS/firefox -new-instance -P "$profile" -foreground 2>/dev/null >/dev/null  &
 }
 
 function print_help
 {
 	cat << EOF
-	DESCRIPTION
-	Manage SSH tunnels.
+DESCRIPTION
+Manage SSH tunnels.
 
-	OPTIONS
-	-c				Print the contents of the configuration file.
-	-k				Kills all currently active SSH tunnels.
-	-l				List all currently active SSH tunnels.
-	-s <alias>		Starts an SSH tunel with the given alias.
-	-h				Help.
+OPTIONS
+-c				Print the contents of the configuration file.
+-k				Kills all currently active SSH tunnels.
+-l				List all currently active SSH tunnels.
+-s <alias>		Starts an SSH tunel with the given alias.
+-h				Help.
 
-	EXAMPLES
-	sshtun -s local 
+EXAMPLES
+sshtun -s local 
 EOF
-
-	return $?
 }
 
-log() 
+log_info() 
 {
     local text=$1
-    echo -e "${COLOR}[$(date)]: ${COLOR}$text${NO_COLOR}"
+	echo -e "${YELLOW}[$(date)]: ${YELLOW}$text${NO_COLOR}"
+}
+
+log_debug()
+{
+	local text=$1
+
+	if [ $VERBOSE -eq 1 ]; then
+		echo -e "${LIGHT_RED}[DEBUG][$(date)]: ${LIGHT_RED}$text${NO_COLOR}"
+	fi
 }
 
 # check for single character options
-while getopts ":cklhs:" opt; do
+while getopts ":cklhr:ps:v" opt; do
 	case $opt in
-		c)
-			read_config_file
-			exit $?
+		s)
+			start_tunel "$OPTARG"
 		;;
 		k)
 			kill_tunnels
-			exit $?
 		;;
 		l)
 			list_tunnels
-			exit $?
+		;;
+		c)
+			read_config_file
+		;;
+		r)
+			if [ -n "$PROFILE" ]; then
+				run_firefox_with_profile "$PROFILE"
+				return 0
+			fi
+
+			if [ -n "$OPTARG" ]; then
+				run_firefox_with_profile "$OPTARG"
+				return 0
+			fi
 		;;
 		h)
 			print_help
-			exit $?
 		;;
-		s)
-			start_tunel "$OPTARG"
-			exit $?
-		;;
-		r)
-			read_config_file
-			exit $?
+		v)
+			VERBOSE=1
 		;;
 		\?)
 			echo "Invalid option: -$OPTARG" >&2
