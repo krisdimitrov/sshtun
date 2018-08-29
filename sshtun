@@ -1,14 +1,25 @@
 #!/bin/bash
-
 CONFIG_FILE="/etc/sshtun/sshtun.conf"
+HOSTS_FILE=""
+
+SSH_USER=""
+SSH_PORT=""
+SSH_COMMAND_TEMPLATE="ssh -D port -f -C -q -N connection # alias"
 SSH_SEARCH_STRING="[s]sh -D"
-SSH_COMMAND_TEMPLATE="ssh -D port -f -C -q -N connection"
+
+FIREFOX_SEARCH_STRING="[f]irefox"
+FIREFOX_PROFILE=""
+
 VERBOSE=0
-PROFILE=""
 
 YELLOW='\033[0;33m'
 LIGHT_RED='\033[1;31m'
 NO_COLOR='\033[0m'
+
+function get_property_from_file
+{
+    grep -w "${1}" $CONFIG_FILE | cut -d'=' -f2
+}
 
 function start_tunel
 {
@@ -16,30 +27,21 @@ function start_tunel
 	log_debug "Alias: $alias"
 
 	local ip=""
-	ip=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $2}')
+	ip=$(cat $HOSTS_FILE | grep -w "$alias" | tr -d '\n' | awk '{print $1}' | tr -d "\040\011\012\015")
 	log_debug "IP: $ip"
 
-	local user=""
-	user=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $3}')
-	log_debug "User: $user"
-
-	local port=""
-	port=$(cat $CONFIG_FILE | grep "$alias" | awk '{print $4}')
-	log_debug "Port: $port"
-
 	local connection=""
-	connection="$user@$ip"
+	connection="$SSH_USER@$ip"
 	log_debug "Connection: $connection"
 
 	local sshCommand=""
-	sshCommand=$(sed -e "s/port/$port/" -e "s/connection/$connection/" <<< "$SSH_COMMAND_TEMPLATE")
+	sshCommand=$(sed -e "s/port/$SSH_PORT/" -e "s/connection/$connection/" -e "s/alias/$alias/" <<< "$SSH_COMMAND_TEMPLATE")
 	log_debug "Executing command: $sshCommand"
 
 	log_info "Starting SSH tunnel '$alias'"
 	eval "$sshCommand"
 
-	create_firefox_profile "$alias" "$port"
-	PROFILE=$alias
+	log_info "Tunnel started."
 }
 
 function kill_tunnels
@@ -54,7 +56,7 @@ function kill_tunnels
 	else
 		pid_array=($result)
 
-		for pid in "${pid_array[@]}" 
+		for pid in "${pid_array[@]}"
 		do
 			echo "Killing $pid..."
 
@@ -62,7 +64,7 @@ function kill_tunnels
 			returnCode=$?
 
 			if [ $returnCode -eq 0 ]; then
-				echo "Successfully killed proces with PID: $pid" 
+				echo "Successfully killed proces with PID: $pid"
 			else
 				echo "Failed to kill process with PID: $pid"
 			fi
@@ -91,10 +93,10 @@ function read_config_file
 	column -t "$CONFIG_FILE"
 }
 
-function set_user_pref() 
+function set_user_pref()
 {
 	if [ $(grep -c "user_pref(\"$2\", .*);" $1) -eq 1 ]; then
-		sed -i .bckp "s/user_pref(\"$2\", .*);/user_pref(\"$2\", $3);/" $1	
+		sed -i .bckp "s/user_pref(\"$2\", .*);/user_pref(\"$2\", $3);/" $1
 	else
 		echo "user_pref(\"$2\", $3);" >> $1
 	fi
@@ -102,25 +104,53 @@ function set_user_pref()
 
 function create_firefox_profile
 {
-	log_info "Creating Firefox profile..."
-
-	local ff_profile=$1
+	local ff_profile=$FIREFOX_PROFILE
 	log_debug "Firefox Profile: $ff_profile"
 
 	local proxy_port=$2
 	local profile_path="."
 
-	# Create new firefox profile to be configured with  the SOCKS proxy
+	# Create new firefox profile to be configured with the SOCKS proxy
 	if [ ! -d /Users/$USER/Library/Application\ Support/Firefox/Profiles/*.$ff_profile/ ]; then
+		log_info "Creating Firefox profile..."
 		/Applications/Firefox.app/Contents/MacOS/firefox -CreateProfile $ff_profile
 	fi
 
+	log_info "Found existing Firefox profile $ff_profile"
 	cd /Users/$USER/Library/Application\ Support/Firefox/Profiles/*.$ff_profile/
 
 	set_user_pref $profile_path/prefs.js network.proxy.type 1
 	set_user_pref $profile_path/prefs.js network.proxy.socks_remote_dns true
 	set_user_pref $profile_path/prefs.js network.proxy.socks \"localhost\"
 	set_user_pref $profile_path/prefs.js network.proxy.socks_port $proxy_port
+}
+
+function kill_firefox_instances
+{
+	local result=""
+	result=$(ps aux | pgrep -f "$FIREFOX_SEARCH_STRING")
+	local returnCode=$?
+
+	if [ $returnCode -eq 1 ]; then
+		echo "Cannot find Firefox processes!"
+		return 1
+	else
+		pid_array=($result)
+
+		for pid in "${pid_array[@]}"
+		do
+			echo "Killing $pid..."
+
+			kill "$pid"
+			returnCode=$?
+
+			if [ $returnCode -eq 0 ]; then
+				echo "Successfully killed proces with PID: $pid"
+			else
+				echo "Failed to kill process with PID: $pid"
+			fi
+		done
+	fi
 }
 
 function run_firefox_with_profile
@@ -143,11 +173,11 @@ OPTIONS
 -h				Help.
 
 EXAMPLES
-sshtun -s local 
+sshtun -s local
 EOF
 }
 
-log_info() 
+log_info()
 {
     local text=$1
 	echo -e "${YELLOW}[$(date)]: ${YELLOW}$text${NO_COLOR}"
@@ -162,10 +192,31 @@ log_debug()
 	fi
 }
 
+init()
+{
+	log_debug "Initializing configuration variables..."
+
+	HOSTS_FILE=$(get_property_from_file "hosts.path")
+	log_debug $HOSTS_FILE
+
+	SSH_USER=$(get_property_from_file "ssh.user")
+	log_debug $SSH_USER
+
+	SSH_PORT=$(get_property_from_file "ssh.port")
+	log_debug $SSH_PORT
+
+	FIREFOX_PROFILE=$(get_property_from_file "firefox.profile")
+	log_debug $FIREFOX_PROFILE
+}
+
+# Main
+init
+
 # check for single character options
 while getopts ":cklhr:ps:v" opt; do
 	case $opt in
 		s)
+			create_firefox_profile $FIREFOX_PROFILE $SSH_PORT
 			start_tunel "$OPTARG"
 		;;
 		k)
@@ -180,12 +231,10 @@ while getopts ":cklhr:ps:v" opt; do
 		r)
 			if [ -n "$PROFILE" ]; then
 				run_firefox_with_profile "$PROFILE"
-				return 0
 			fi
 
 			if [ -n "$OPTARG" ]; then
 				run_firefox_with_profile "$OPTARG"
-				return 0
 			fi
 		;;
 		h)
